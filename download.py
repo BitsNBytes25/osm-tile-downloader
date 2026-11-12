@@ -11,8 +11,10 @@ import json
 import re
 import shutil
 import subprocess
+import ssl
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -33,6 +35,110 @@ AUTO_SCALE_LOW_KM     = 300.0 # swath radius in km at the low zoom
 AUTO_SCALE_HIGH_ZOOM  = 17    # zoom at which the focus tightens
 AUTO_SCALE_HIGH_KM    = 10.0  # focus radius in km at the high zoom
 KM_PER_DEG = 111.32
+
+
+# --- SSL context (공용 TLS 설정) ---
+# All HTTPS requests share one context (initialized in main()). The default
+# (system) CA bundle is tried first; if certificate verification fails and the
+# optional 'certifi' bundle is importable (python.org / Homebrew installs ship
+# it; most Linux distros include it), the context switches to it once. This
+# makes the script work on macOS installs without a usable system CA store,
+# with no changes to the host platform.
+_ssl_context = None             # active context for all HTTPS requests
+_ssl_default = None             # the original default context
+_ssl_certifi_tried = False      # set once, when the certifi switch is attempted
+
+
+def _init_ssl_context():
+	"""Initializes the shared SSL context used for all HTTPS requests."""
+	global _ssl_context, _ssl_default
+	_ssl_default = ssl.create_default_context()
+	_ssl_context = _ssl_default
+
+
+def _build_certifi_context():
+	"""Returns an SSL context backed by the 'certifi' CA bundle,
+	or None if certifi is not installed or its bundle is unusable."""
+	try:
+		import certifi
+	except ImportError:
+		return None
+	try:
+		return ssl.create_default_context(cafile=certifi.where())
+	except Exception:
+		return None
+
+
+def _try_certifi_fallback():
+	"""Switches _ssl_context to the certifi context if it is available.
+
+	Returns True only when the switch actually happened."""
+	global _ssl_context, _ssl_certifi_tried
+	if _ssl_certifi_tried:
+		return False
+	_ssl_certifi_tried = True
+	ctx = _build_certifi_context()
+	if ctx is None:
+		return False
+	_ssl_context = ctx
+	print(
+		"note: certificate verification failed with the system CA bundle; "
+		"switching to the 'certifi' CA bundle",
+		file=sys.stderr,
+	)
+	return True
+
+
+def _cert_error(exc):
+	"""Returns True if 'exc' (possibly wrapped by urllib as a URLError) is a
+	certificate verification failure."""
+	if isinstance(exc, ssl.SSLCertVerificationError):
+		return True
+	if isinstance(exc, urllib.error.URLError):
+		return isinstance(exc.reason, ssl.SSLCertVerificationError)
+	return False
+
+
+def _urlopen(request, timeout):
+	"""Opens 'request' with the active SSL context.
+
+	If the current context fails certificate verification and certifi is
+	available, switches to it and retries once. Re-raises any error that
+	survives the fallback.
+	"""
+	try:
+		return urllib.request.urlopen(
+			request, timeout=timeout, context=_ssl_context
+		)
+	except (ssl.SSLCertVerificationError, urllib.error.URLError) as exc:
+		if _cert_error(exc) and _try_certifi_fallback():
+			return _urlopen(request, timeout)
+		raise
+
+
+def _ssl_unrecoverable_hint():
+	"""Diagnosis shown when certificate verification failed even after the
+	certifi fallback was attempted."""
+	if _ssl_context is _ssl_default:
+		return (
+			"certificate verification failed and the optional 'certifi' CA "
+			"bundle is not usable by this Python.\n"
+			"Fixes:\n"
+			"  * install certifi:  python3 -m pip install --user certifi\n"
+			"  * repair the system CA store. On python.org macOS installs this "
+			"is usually a missing or empty\n"
+			"  /Library/Frameworks/Python.framework/Versions/x.y/etc/openssl/cert.pem;\n"
+			"  copy site-packages/certifi/cacert.pem over it (sudo cp ...).\n"
+			"  * or run once with your own bundle:\n"
+			"     SSL_CERT_FILE=/path/to/ca-bundle.pem python3 download.py"
+		)
+	return (
+		"certificate verification failed even with the 'certifi' CA bundle.\n"
+		"Likely causes: a TLS-intercepting proxy (check 'scutil --proxy')\n"
+		"or a wrong system clock/date.\n"
+		"For a one-off run point Python at a specific bundle:\n"
+		"    SSL_CERT_FILE=/path/to/ca-bundle.pem python3 download.py"
+	)
 
 
 def auto_radius_km(zoom):
@@ -82,7 +188,7 @@ def _query_ip_location(url, timeout):
 	"""Query a public IP-geolocation API. Returns (lat, lng) or None."""
 	req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
 	try:
-		with urllib.request.urlopen(req, timeout=timeout) as resp:
+		with _urlopen(req, timeout=timeout) as resp:
 			data = json.loads(resp.read().decode("utf-8"))
 	except Exception:
 		return None
@@ -136,9 +242,13 @@ def geocode_location(name, timeout=10):
 	params = urllib.parse.urlencode({"q": name, "format": "json", "limit": 1})
 	req = urllib.request.Request(NOMINATIM_URL + "?" + params, headers={"User-Agent": USER_AGENT})
 	try:
-		with urllib.request.urlopen(req, timeout=timeout) as resp:
+		with _urlopen(req, timeout=timeout) as resp:
 			data = json.loads(resp.read().decode("utf-8"))
-	except Exception:
+	except Exception as exc:
+		# Re-raise certificate failures so the caller can report the broken
+		# setup instead of treating it as a bad place name.
+		if _cert_error(exc):
+			raise
 		return None
 	if not isinstance(data, list) or not data:
 		return None
@@ -161,14 +271,16 @@ def fetch_tile(url, output_path, delay, retries, timeout=30):
 	Downloads are written to a ``.part`` temporary file and atomically renamed
 	only once complete, so a crashed run never leaves a truncated tile in place.
 	Transient failures are retried with an increasing backoff; the last failure
-	is re-raised when all attempts are exhausted.
+	is re-raised when all attempts are exhausted. HTTPS requests go through the
+	shared SSL context (_urlopen), which falls back to the optional 'certifi'
+	CA bundle if the system one is broken.
 	"""
 	last_exc = None
 	for attempt in range(1, retries + 1):
 		tmp_path = output_path + ".part"
 		try:
 			req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-			with urllib.request.urlopen(req, timeout=timeout) as resp:
+			with _urlopen(req, timeout=timeout) as resp:
 				data = resp.read()
 			with open(tmp_path, "wb") as tmp_file:
 				tmp_file.write(data)
@@ -227,6 +339,9 @@ def main():
 
 	args = parser.parse_args()
 
+	# Initialize the shared SSL context before any network calls.
+	_init_ssl_context()
+
 	if args.extent is not None and args.extent <= 0:
 		parser.error("--extent must be greater than 0")
 
@@ -250,7 +365,16 @@ def main():
 	source = None
 	if args.bbox is None:
 		if args.location is not None:
-			result = geocode_location(args.location)
+			try:
+				result = geocode_location(args.location)
+			except Exception as exc:
+				# Certificate errors mean a broken CA setup, not a bad place name.
+				if _cert_error(exc):
+					parser.error(
+						f"could not geocode {args.location!r}: "
+						f"certificate verification failed. "
+						f"{_ssl_unrecoverable_hint()}"
+					)
 			if result is None:
 				parser.error(
 					f"could not geocode {args.location!r}; "
@@ -341,6 +465,11 @@ def main():
 		except Exception as exc:
 			failed += 1
 			print(f"failed tile z={z} x={x} y={y}: {exc}", file=sys.stderr)
+			# A certificate error after the fallback is systemic; every
+			# remaining tile fails identically, so exit early with a diagnosis.
+			if _cert_error(exc):
+				print(_ssl_unrecoverable_hint(), file=sys.stderr)
+				sys.exit(1)
 		print(
 			f"\r[{i}/{len(tiles)}] {downloaded} fetched, {skipped} skipped, {failed} failed  (z={z} x={x} y={y})   ",
 			end="", flush=True,

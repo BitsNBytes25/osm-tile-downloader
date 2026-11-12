@@ -24,6 +24,10 @@ downloads each tile from a tile server, and stores it locally under the standard
 
 - Python 3 (uses only the standard library — `argparse`, `urllib`, etc.).
   No `pip install` needed.
+- For TLS, the script uses your system CA certificates first and falls back to
+  the optional `certifi` package if it happens to be importable (python.org
+  and Homebrew Python installs ship it; most Linux distros include it). It is
+  only a fallback — nothing new is required.
 - An internet connection (needed to reach the tile server, and — if you don't
   pass `--bbox` — to geocode a `--location` name via Nominatim or to
   auto-geolocate your IP).
@@ -198,6 +202,28 @@ done: 2/2 downloaded, 0 skipped (already present), 0 failed (out of 2 tile(s) in
 - **Custom tile servers.** Use `--url-template` to point at any server that
   follows the `/{z}/{x}/{y}.png` convention (e.g., a self-hosted Mapnik tile cache).
 - **`--delay 0`** disables the inter-request pause — only if your server allows it.
+
+## Troubleshooting
+
+**`SSL: CERTIFICATE_VERIFY_FAILED ... unable to get local issuer certificate`**
+
+The Python installation can't find a usable CA certificate store (the common
+case: a python.org or Homebrew macOS install whose
+`/Library/Frameworks/Python.framework/Versions/x.y/etc/openssl/cert.pem` is
+missing or empty). The script self-heals by switching to the `certifi` CA
+bundle on the first tile; if that's unusable too, it exits immediately with a
+diagnosis instead of failing tile by tile.
+
+Permanent fixes:
+
+- Reinstall the Python installer (python.org / Homebrew), or reinstall `certifi`:
+  `python3 -m pip install --user certifi`.
+- Restore the missing CA file: copy `site-packages/certifi/cacert.pem` over
+  `.../etc/openssl/cert.pem` (needs `sudo`).
+- One-off workaround:
+  `SSL_CERT_FILE=/path/to/ca-bundle.pem python3 download.py`.
+- If you're behind a TLS-intercepting proxy (work/school network), point
+  `SSL_CERT_FILE` at your organization's root CA.
 
 ## Attribution (if you reuse the tiles)
 
