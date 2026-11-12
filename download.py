@@ -479,7 +479,7 @@ def main():
 	print(
 		f"downloading {len(tiles)} tile(s) "
 		f"(of {total} in bbox, {skipped} already present) "
-		f"at ~{args.delay:.1f}s/request",
+		f"with ~{args.delay:.1f}s delay",
 		file=sys.stderr,
 	)
 

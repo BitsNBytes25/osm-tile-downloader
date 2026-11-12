@@ -69,7 +69,7 @@ python3 download.py --bbox MIN_LON MIN_LAT MAX_LON MAX_LAT
 | `--map-type`    | str    | `topo`           | `topo` (OpenTopoMap) or `standard` (OpenStreetMap).                        |
 | `--url-template`| str    | *(auto)*         | Optional tile-server URL template with `{z}/{x}/{y}` placeholders, overrides the default for `--map-type`. |
 | `--output-dir`  | str    | `./map_tiles`    | Directory where tiles are written (existing files are skipped).               |
-| `--delay`       | float  | 1.0              | Seconds to sleep between tile requests (politeness / rate limit).            |
+| `--delay`       | float  | 0.2              | Seconds to sleep between tile requests (politeness / rate limit).            |
 | `--retries`     | int    | 3                | Max download attempts per tile before giving up.                             |
 
 ### Map types and licenses
