@@ -13,7 +13,7 @@ downloads each tile from a tile server, and stores it locally under the standard
 
 - **Resumable** – tiles that already exist on disk are skipped, so you can interrupt
   and re-run the same command to pick up where you left off.
-- **Server-friendly** – a delay (default **500ms**) is inserted between tile
+- **Server-friendly** – a delay (default **200ms**) is inserted between tile
   requests so as not to overwhelm the server.
 - **Safe writes** – each tile is written to a temporary `.part` file and only
   atomically renamed once the download is complete, so a crash never leaves a
@@ -182,12 +182,12 @@ On run, you'll see:
 
 ```
 downloading 2 tile(s) (of 2 in bbox, 0 already present) at ~1.0s/request; estimated 0.1 min
-[1/2] 1 fetched, 0 skipped, 0 failed  (z=15 x=27938 y=12698)
-[2/2] 2 fetched, 0 skipped, 0 failed  (z=15 x=27938 y=12699)
+[1/2] 1 fetched, 0 skipped, 0 failed, ETA 1.0 s  (z=15 x=27938 y=12698)
+[2/2] 2 fetched, 0 skipped, 0 failed, ETA 0.0 s  (z=15 x=27938 y=12699)
 done: 2/2 downloaded, 0 skipped (already present), 0 failed (out of 2 tile(s) in bbox).
 ```
 
-- A **live progress line** is updated per tile.
+- A **live progress line** is updated per tile, including an estimated time remaining (ETA) that adapts to the observed per-tile rate (fetch time plus the politeness delay).
 - Re-running a finished region prints `nothing to download: all N tile(s) already present`.
 - **Exit code:** `0` on full success, `1` if any tile failed (useful for scripting).
 

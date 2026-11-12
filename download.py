@@ -301,6 +301,33 @@ def fetch_tile(url, output_path, delay, retries, timeout=30):
 		raise last_exc
 
 
+def _format_duration(seconds):
+	"""Returns a human-readable duration for the progress output.
+	짧은 시간은 초, 그 다음 분, 그 다음 시간으로 표시한다.
+	"""
+	seconds = max(0.0, seconds)
+	if seconds >= 3600:
+		return f"{seconds / 3600:.1f} h"
+	if seconds >= 60:
+		return f"{seconds / 60:.1f} min"
+	if seconds >= 1:
+		return f"{seconds:.0f} s"
+	return f"{seconds:.1f} s"
+
+
+def _eta_seconds(elapsed, processed, delay, remaining):
+	"""Estimates seconds remaining using the observed per-tile rate.
+	지연 시간을 포함한 평균 속도((elapsed + delay) / processed)를 계산하고
+	남은 타일 수(remaining)를 곱해서 추정한다.
+	"""
+	if remaining <= 0:
+		return 0.0
+	if processed <= 0:
+		return remaining * delay
+	per_tile = (elapsed + delay) / processed
+	return max(0.0, remaining * per_tile)
+
+
 def main():
 	"""
 	주어진 경계상자와 줌 레벨에 대해 타일을 서버에서 다운로드한다.
@@ -334,7 +361,7 @@ def main():
 	parser.add_argument("--map-type", type=str, choices=["topo", "standard"], default="topo", help="Map tile type: 'topo' (default) uses OpenTopoMap topographic tiles and stores them under map_tiles/topo/; 'standard' uses OpenStreetMap tiles and stores them under map_tiles/")
 	parser.add_argument("--url-template", type=str, default=None, help="Tile server URL template; overrides the default for the selected --map-type")
 	parser.add_argument("--output-dir", type=str, default="./map_tiles", help="Output directory for tiles (existing files are skipped)")
-	parser.add_argument("--delay", type=float, default=0.5, help="Seconds to sleep between tile requests to be polite to the server (default: 0.5)")
+	parser.add_argument("--delay", type=float, default=0.2, help="Seconds to sleep between tile requests to be polite to the server (default: 0.2)")
 	parser.add_argument("--retries", type=int, default=3, help="Max download attempts per tile before giving up (default: 3)")
 
 	args = parser.parse_args()
@@ -452,12 +479,15 @@ def main():
 	print(
 		f"downloading {len(tiles)} tile(s) "
 		f"(of {total} in bbox, {skipped} already present) "
-		f"at ~{args.delay:.1f}s/request; estimated {len(tiles) * args.delay / 60:.1f} min",
+		f"at ~{args.delay:.1f}s/request",
 		file=sys.stderr,
 	)
 
 	downloaded = 0
 	failed = 0
+	# 시간 기준 예상 소요 시간을 계산하기 위해 시작 시점을 기록한다.
+	# Record the start time so the ETA can be based on the observed rate.
+	start = time.perf_counter()
 	for i, (z, x, y, url, output_path) in enumerate(tiles, 1):
 		try:
 			fetch_tile(url, output_path, args.delay, args.retries)
@@ -470,8 +500,14 @@ def main():
 			if _cert_error(exc):
 				print(_ssl_unrecoverable_hint(), file=sys.stderr)
 				sys.exit(1)
+		# 완료된 타일 수(=반복 횟수)로 평균 속도를 추산해 남은 예상 시간을 계산한다.
+		# Estimate the per-tile rate from elapsed time and show the remaining ETA.
+		eta = _eta_seconds(
+			time.perf_counter() - start, i, args.delay, len(tiles) - i,
+		)
 		print(
-			f"\r[{i}/{len(tiles)}] {downloaded} fetched, {skipped} skipped, {failed} failed  (z={z} x={x} y={y})   ",
+			f"\r[{i}/{len(tiles)}] {downloaded} fetched, {skipped} skipped, {failed} failed, "
+			f"ETA {_format_duration(eta)} (z={z} x={x} y={y})   ",
 			end="", flush=True,
 		)
 		# 타일 서버에 부하를 주지 않기 위해 요청 간 지연
