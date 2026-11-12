@@ -37,7 +37,9 @@ With no arguments this:
 
 1. Auto-detects your approximate location (via OS tools, falling back to
    `ip-api.com` / `ipinfo.io`).
-2. Builds a bounding box centered on that location (±1° by default, `--extent`).
+2. For **each** zoom level, builds a centered region whose radius tapers with
+   zoom — a wide swath at low zoom down to a ~10 km focus at z17 (a "per-zoom
+   auto scale"). Pass `--extent N` to force a single uniform ±N° box instead.
 3. Downloads **OpenTopoMap** tiles (default map type) for zoom 3–15.
 
 If you know your coordinates, just pass a bounding box:
@@ -56,7 +58,7 @@ python3 download.py --bbox MIN_LON MIN_LAT MAX_LON MAX_LAT
 | `--min-zoom`    | int    | 3                | Minimum zoom level (lower = less detail, fewer tiles).                        |
 | `--max-zoom`    | int    | 15               | Maximum zoom level (higher = more detail, far more tiles).                   |
 | `--bbox`        | float  | *(auto-detected)*| Bounding box: `MIN_LON MIN_LAT MAX_LON MAX_LAT`. If omitted, location is auto-detected. |
-| `--extent`      | float  | 1.0              | Bounding-box half-width in degrees, used only when `--bbox` is omitted.     |
+| `--extent`      | float  | None (auto scale)| Bounding-box half-width in degrees; used with omitted `--bbox` to force a **single uniform** region. Omit it to use the per-zoom auto scale instead. |
 | `--map-type`    | str    | `topo`           | `topo` (OpenTopoMap) or `standard` (OpenStreetMap).                        |
 | `--url-template`| str    | *(auto)*         | Optional tile-server URL template with `{z}/{x}/{y}` placeholders, overrides the default for `--map-type`. |
 | `--output-dir`  | str    | `./map_tiles`    | Directory where tiles are written (existing files are skipped).               |
@@ -101,7 +103,10 @@ python3 download.py --bbox 126.94 37.48 126.945 37.50 --map-type standard
 python3 download.py --bbox 126.94 37.48 126.945 37.50 --output-dir ./my_tiles
 ```
 
-### A larger bounding box centered on your current location
+### A uniform region centered on your current location
+
+`--extent` forces a **single fixed** radius for every zoom. Omit it to use the
+per-zoom auto scale instead. For a ±3° uniform box at z3–13:
 
 ```bash
 python3 download.py --extent 3.0 --min-zoom 3 --max-zoom 13
@@ -138,8 +143,12 @@ OH ≈ 40.03, −82.88), the z=3 tile for that region is `map_tiles/topo/3/2/2.p
 
 ## How long will it take?
 
-The number of tiles grows roughly **4× per zoom level**. As a rough guide for a
-±1° (2°×2°) region:
+The number of tiles grows roughly **4× per zoom level**. The default per-zoom
+auto scale (no `--bbox`, no `--extent`) tapers the region from a wide low-zoom
+swath down to ~10 km at z17, so the **default z3–15 run is only a few thousand
+tiles** (dominated by the top zoom) instead of the tens of thousands a flat
+±1° box would require. As a rough guide for a fixed **uniform** ±1° (2°×2°)
+box (force one with `--extent 1.0`):
 
 | Zoom range | Approx. tiles | Time at 1 s/tile |
 |------------|---------------|------------------|

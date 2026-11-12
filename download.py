@@ -22,6 +22,31 @@ DEFAULT_URL_TEMPLATES = {
 
 USER_AGENT = "osm-tile-downloader/1.0"
 
+# Automatic per-zoom region size (used only when --bbox is omitted and
+# --extent is not set). A geometric "sliding scale": a wide swath at low zoom
+# tapers to a tight ~10 km focus at z17 so high-zoom downloads stay small.
+AUTO_SCALE_LOW_ZOOM   = 3     # zoom at which the widest swath is used
+AUTO_SCALE_LOW_KM     = 300.0 # swath radius in km at the low zoom
+AUTO_SCALE_HIGH_ZOOM  = 17    # zoom at which the focus tightens
+AUTO_SCALE_HIGH_KM    = 10.0  # focus radius in km at the high zoom
+KM_PER_DEG = 111.32
+
+
+def auto_radius_km(zoom):
+	"""Radius (km) of the auto-download region for a single zoom level.
+
+	Geometric (log-linear) taper from a wide swath (AUTO_SCALE_LOW_KM at
+	AUTO_SCALE_LOW_ZOOM) to a tight focus (AUTO_SCALE_HIGH_KM at
+	AUTO_SCALE_HIGH_ZOOM); clamped to the endpoints outside that range.
+	"""
+	if zoom <= AUTO_SCALE_LOW_ZOOM:
+		return AUTO_SCALE_LOW_KM
+	if zoom >= AUTO_SCALE_HIGH_ZOOM:
+		return AUTO_SCALE_HIGH_KM
+	t = (zoom - AUTO_SCALE_LOW_ZOOM) / (AUTO_SCALE_HIGH_ZOOM - AUTO_SCALE_LOW_ZOOM)
+	return AUTO_SCALE_LOW_KM * (AUTO_SCALE_HIGH_KM / AUTO_SCALE_LOW_KM) ** t
+
+
 def lonlat_to_tile_coords(lon, lat, zoom):
 	"""
 	경위도를 타일 좌표(x, y)로 변환합니다.
@@ -138,6 +163,11 @@ def main():
 	주어진 경계상자와 줌 레벨에 대해 타일을 서버에서 다운로드한다.
 	Downloads OSM tiles for a given bounding box and zoom levels.
 
+	When --bbox is omitted, the location is auto-detected and every zoom level
+	is centered on it. The region radius then tapers with zoom (a wide swath at
+	low zoom down to a ~10 km focus at z17) unless a fixed --extent is
+	supplied.
+
 	Supports two map types, chosen with --map-type:
 	* 'topo' (default): OpenTopoMap topographic tiles,
 	  https://tile.opentopomap.org/{z}/{x}/{y}.png,
@@ -155,7 +185,7 @@ def main():
 	parser.add_argument("--min-zoom", type=int, default=3, help="Minimum zoom level (default: 3)")
 	parser.add_argument("--max-zoom", type=int, default=15, help="Maximum zoom level (default: 15)")
 	parser.add_argument("--bbox", type=float, nargs=4, default=None, metavar=('MIN_LON', 'MIN_LAT', 'MAX_LON', 'MAX_LAT'), help="Bounding box; if omitted, centered on the auto-detected location")
-	parser.add_argument("--extent", type=float, default=1.0, help="Bounding-box half-width in degrees used when --bbox is omitted (default 1.0)")
+	parser.add_argument("--extent", type=float, default=None, help="Bounding-box half-width in degrees, used when --bbox is omitted to force a uniform region; omit it (default) to use a per-zoom auto scale instead")
 	parser.add_argument("--map-type", type=str, choices=["topo", "standard"], default="topo", help="Map tile type: 'topo' (default) uses OpenTopoMap topographic tiles and stores them under map_tiles/topo/; 'standard' uses OpenStreetMap tiles and stores them under map_tiles/")
 	parser.add_argument("--url-template", type=str, default=None, help="Tile server URL template; overrides the default for the selected --map-type")
 	parser.add_argument("--output-dir", type=str, default="./map_tiles", help="Output directory for tiles (existing files are skipped)")
@@ -164,7 +194,7 @@ def main():
 
 	args = parser.parse_args()
 
-	if args.extent <= 0:
+	if args.extent is not None and args.extent <= 0:
 		parser.error("--extent must be greater than 0")
 
 	if args.min_zoom > args.max_zoom:
@@ -176,34 +206,55 @@ def main():
 	if args.retries < 1:
 		parser.error("--retries must be at least 1")
 
+	# When --bbox is omitted we derive the region(s) from an auto-detected
+	# location. Each zoom is centered on that location; the radius tapers with
+	# zoom (per-zoom auto scale) or is held constant (--extent).
+	center = None
 	if args.bbox is None:
-		location = detect_location()
-		if location is None:
+		center = detect_location()
+		if center is None:
 			parser.error("could not detect location; specify --bbox explicitly")
-		lat, lng = location
-		half = args.extent
-		min_lon, min_lat, max_lon, max_lat = (
-			lng - half, max(-89.99, lat - half), lng + half, min(89.99, lat + half)
-		)
-		print(
-			f"auto-detected location {lat:.4f}, {lng:.4f}; using bounding box "
-			f"{min_lon:.4f} {min_lat:.4f} {max_lon:.4f} {max_lat:.4f}",
-			file=sys.stderr,
-		)
-	else:
-		min_lon, min_lat, max_lon, max_lat = args.bbox
+		lat, lng = center
 
 	url_template = args.url_template or DEFAULT_URL_TEMPLATES[args.map_type]
 	output_base = os.path.join(args.output_dir, "topo") if args.map_type == "topo" else args.output_dir
 
 	os.makedirs(output_base, exist_ok=True)
 
+	# Summarize the derived region(s) before downloading.
+	# 다운로드 대상 영역(경위도 기반)을 요약하여 출력한다.
+	if center is not None:
+		if args.extent is not None:
+			half = args.extent
+			print(
+				f"auto-detected location {lat:.4f}, {lng:.4f}; using uniform "
+				f"bounding box {lng-half:.4f} {max(-89.99, lat-half):.4f} "
+				f"{lng+half:.4f} {min(89.99, lat+half):.4f}",
+				file=sys.stderr,
+			)
+		else:
+			print(
+				f"auto-detected location {lat:.4f}, {lng:.4f}; per-zoom auto scale "
+				f"{auto_radius_km(args.min_zoom):.0f} km @z{args.min_zoom} -> "
+				f"{auto_radius_km(args.max_zoom):.1f} km @z{args.max_zoom} "
+				"(wide swath at low zoom -> tight focus at high zoom)",
+				file=sys.stderr,
+			)
+
 	# 경계상자의 타일을 계산하고, 이미 존재하는 파일은 스킵
-	# Compute the tiles for the bounding box, skipping any file already present.
+	# Compute the tiles for each zoom, skipping any file already present.
+	# --bbox가 없으면 각 줌별로 중심화된 영역을 사용한다.
 	tiles = []
 	total = 0
 	skipped = 0
 	for z in range(args.min_zoom, args.max_zoom + 1):
+		if args.bbox is not None:
+			min_lon, min_lat, max_lon, max_lat = args.bbox
+		else:
+			half = args.extent if args.extent is not None else auto_radius_km(z) / KM_PER_DEG
+			min_lon, min_lat, max_lon, max_lat = (
+				lng - half, max(-89.99, lat - half), lng + half, min(89.99, lat + half)
+			)
 		x_min, y_max = lonlat_to_tile_coords(min_lon, min_lat, z)
 		x_max, y_min = lonlat_to_tile_coords(max_lon, max_lat, z)
 		for x in range(x_min, x_max + 1):
