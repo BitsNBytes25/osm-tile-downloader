@@ -25,7 +25,8 @@ downloads each tile from a tile server, and stores it locally under the standard
 - Python 3 (uses only the standard library — `argparse`, `urllib`, etc.).
   No `pip install` needed.
 - An internet connection (needed to reach the tile server, and — if you don't
-  pass `--bbox` — to geolocate your IP).
+  pass `--bbox` — to geocode a `--location` name via Nominatim or to
+  auto-geolocate your IP).
 
 ## Quick start
 
@@ -35,8 +36,9 @@ python3 download.py
 
 With no arguments this:
 
-1. Auto-detects your approximate location (via OS tools, falling back to
-   `ip-api.com` / `ipinfo.io`).
+1. Determines the center point: a `--location` name (one Nominatim geocode
+   query) or your approximate location, auto-detected via OS tools with
+   `ip-api.com` / `ipinfo.io` fallback.
 2. For **each** zoom level, builds a centered region whose radius tapers with
    zoom — a wide swath at low zoom down to a ~10 km focus at z17 (a "per-zoom
    auto scale"). Pass `--extent N` to force a single uniform ±N° box instead.
@@ -57,7 +59,8 @@ python3 download.py --bbox MIN_LON MIN_LAT MAX_LON MAX_LAT
 |-----------------|--------|------------------|-----------------------------------------------------------------------------|
 | `--min-zoom`    | int    | 3                | Minimum zoom level (lower = less detail, fewer tiles).                        |
 | `--max-zoom`    | int    | 15               | Maximum zoom level (higher = more detail, far more tiles).                   |
-| `--bbox`        | float  | *(auto-detected)*| Bounding box: `MIN_LON MIN_LAT MAX_LON MAX_LAT`. If omitted, location is auto-detected. |
+| `--bbox`        | float  | *(auto-detected)*| Bounding box: `MIN_LON MIN_LAT MAX_LON MAX_LAT`. Mutually exclusive with `--location`. |
+| `--location`    | str    | None             | Place name to geocode at startup via Nominatim (e.g. 'Athens, Ohio'); used when `--bbox` is omitted. |
 | `--extent`      | float  | None (auto scale)| Bounding-box half-width in degrees; used with omitted `--bbox` to force a **single uniform** region. Omit it to use the per-zoom auto scale instead. |
 | `--map-type`    | str    | `topo`           | `topo` (OpenTopoMap) or `standard` (OpenStreetMap).                        |
 | `--url-template`| str    | *(auto)*         | Optional tile-server URL template with `{z}/{x}/{y}` placeholders, overrides the default for `--map-type`. |
@@ -84,6 +87,16 @@ python3 download.py --bbox MIN_LON MIN_LAT MAX_LON MAX_LAT
 ```bash
 python3 download.py --bbox 126.94 37.48 126.945 37.50
 ```
+
+### Download around a city by name
+
+```bash
+python3 download.py --location "Athens, Ohio"
+```
+
+One geocoding query (Nominatim) resolves the name at startup; the region is
+then built around that point with the same per-zoom auto scale used for an
+auto-detected location.
 
 ### Wider zoom range
 
@@ -176,8 +189,10 @@ done: 2/2 downloaded, 0 skipped (already present), 0 failed (out of 2 tile(s) in
 
 ## Notes & tips
 
-- **Location detection** may return an approximate coordinate (IP-based).
-  If that's wrong for your use case, always pass `--bbox` explicitly.
+- **Location detection** may return an approximate coordinate (IP-based). If
+  that's wrong for your use case, pass `--location 'City, State'` (geocoded
+  via Nominatim, a single query) or an explicit `--bbox`; the two cannot be
+  combined.
 - **Resuming is free.** Because existing files are skipped, re-running after a
   partial download simply continues with the missing tiles.
 - **Custom tile servers.** Use `--url-template` to point at any server that

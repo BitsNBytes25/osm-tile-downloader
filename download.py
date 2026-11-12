@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 DEFAULT_URL_TEMPLATES = {
@@ -21,6 +22,8 @@ DEFAULT_URL_TEMPLATES = {
 }
 
 USER_AGENT = "osm-tile-downloader/1.0"
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
 # Automatic per-zoom region size (used only when --bbox is omitted and
 # --extent is not set). A geometric "sliding scale": a wide swath at low zoom
@@ -122,6 +125,34 @@ def detect_location(timeout=5):
 	return None
 
 
+def geocode_location(name, timeout=10):
+	"""
+	Geocode a place name via Nominatim (OpenStreetMap).
+
+	Single query with limit=1: returns the first match as a
+	(lat, lng, display_name) tuple, or None when the lookup fails or
+	returns no match.
+	"""
+	params = urllib.parse.urlencode({"q": name, "format": "json", "limit": 1})
+	req = urllib.request.Request(NOMINATIM_URL + "?" + params, headers={"User-Agent": USER_AGENT})
+	try:
+		with urllib.request.urlopen(req, timeout=timeout) as resp:
+			data = json.loads(resp.read().decode("utf-8"))
+	except Exception:
+		return None
+	if not isinstance(data, list) or not data:
+		return None
+	try:
+		result = data[0]
+		lat = float(result["lat"])
+		lng = float(result["lon"])
+		if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+			return None
+		return lat, lng, result.get("display_name", name)
+	except (TypeError, KeyError, ValueError):
+		return None
+
+
 def fetch_tile(url, output_path, delay, retries, timeout=30):
 	"""
 	한 타일을 url에서 output_path로 다운로드한다.
@@ -163,10 +194,11 @@ def main():
 	주어진 경계상자와 줌 레벨에 대해 타일을 서버에서 다운로드한다.
 	Downloads OSM tiles for a given bounding box and zoom levels.
 
-	When --bbox is omitted, the location is auto-detected and every zoom level
-	is centered on it. The region radius then tapers with zoom (a wide swath at
-	low zoom down to a ~10 km focus at z17) unless a fixed --extent is
-	supplied.
+	When --bbox is omitted, the center point is geocoded from --location
+	(single Nominatim query at startup) or auto-detected via OS/IP tools;
+	every zoom level is centered on it. The region radius then tapers with
+	zoom (a wide swath at low zoom down to a ~10 km focus at z17) unless a
+	fixed --extent is supplied.
 
 	Supports two map types, chosen with --map-type:
 	* 'topo' (default): OpenTopoMap topographic tiles,
@@ -184,7 +216,8 @@ def main():
 	parser = argparse.ArgumentParser(description="Download tiles for a given bounding box and zoom levels.")
 	parser.add_argument("--min-zoom", type=int, default=3, help="Minimum zoom level (default: 3)")
 	parser.add_argument("--max-zoom", type=int, default=15, help="Maximum zoom level (default: 15)")
-	parser.add_argument("--bbox", type=float, nargs=4, default=None, metavar=('MIN_LON', 'MIN_LAT', 'MAX_LON', 'MAX_LAT'), help="Bounding box; if omitted, centered on the auto-detected location")
+	parser.add_argument("--bbox", type=float, nargs=4, default=None, metavar=('MIN_LON', 'MIN_LAT', 'MAX_LON', 'MAX_LAT'), help="Bounding box; mutually exclusive with --location")
+	parser.add_argument("--location", type=str, default=None, help="Place name to geocode at startup via Nominatim (e.g. 'Athens, Ohio'); used when --bbox is omitted")
 	parser.add_argument("--extent", type=float, default=None, help="Bounding-box half-width in degrees, used when --bbox is omitted to force a uniform region; omit it (default) to use a per-zoom auto scale instead")
 	parser.add_argument("--map-type", type=str, choices=["topo", "standard"], default="topo", help="Map tile type: 'topo' (default) uses OpenTopoMap topographic tiles and stores them under map_tiles/topo/; 'standard' uses OpenStreetMap tiles and stores them under map_tiles/")
 	parser.add_argument("--url-template", type=str, default=None, help="Tile server URL template; overrides the default for the selected --map-type")
@@ -206,14 +239,31 @@ def main():
 	if args.retries < 1:
 		parser.error("--retries must be at least 1")
 
-	# When --bbox is omitted we derive the region(s) from an auto-detected
-	# location. Each zoom is centered on that location; the radius tapers with
-	# zoom (per-zoom auto scale) or is held constant (--extent).
+	if args.bbox is not None and args.location is not None:
+		parser.error("--bbox and --location conflict; choose one")
+
+	# When --bbox is omitted the center point comes from --location (a single
+	# Nominatim geocode at startup) or from OS/IP auto-detection. Each zoom is
+	# centered on that point; the radius tapers with zoom (per-zoom auto
+	# scale) or is held constant (--extent).
 	center = None
+	source = None
 	if args.bbox is None:
-		center = detect_location()
-		if center is None:
-			parser.error("could not detect location; specify --bbox explicitly")
+		if args.location is not None:
+			result = geocode_location(args.location)
+			if result is None:
+				parser.error(
+					f"could not geocode {args.location!r}; "
+					"try a more specific name or pass --bbox explicitly"
+				)
+			(lat, lng, display_name) = result
+			center = (lat, lng)
+			source = f"geocoded {args.location!r} ({display_name})"
+		else:
+			center = detect_location()
+			if center is None:
+				parser.error("could not detect location; specify --bbox or --location explicitly")
+			source = "auto-detected location"
 		lat, lng = center
 
 	url_template = args.url_template or DEFAULT_URL_TEMPLATES[args.map_type]
@@ -224,17 +274,18 @@ def main():
 	# Summarize the derived region(s) before downloading.
 	# 다운로드 대상 영역(경위도 기반)을 요약하여 출력한다.
 	if center is not None:
+		location_desc = f"{source} ({lat:.4f}, {lng:.4f})"
 		if args.extent is not None:
 			half = args.extent
 			print(
-				f"auto-detected location {lat:.4f}, {lng:.4f}; using uniform "
+				f"{location_desc}; using uniform "
 				f"bounding box {lng-half:.4f} {max(-89.99, lat-half):.4f} "
 				f"{lng+half:.4f} {min(89.99, lat+half):.4f}",
 				file=sys.stderr,
 			)
 		else:
 			print(
-				f"auto-detected location {lat:.4f}, {lng:.4f}; per-zoom auto scale "
+				f"{location_desc}; per-zoom auto scale "
 				f"{auto_radius_km(args.min_zoom):.0f} km @z{args.min_zoom} -> "
 				f"{auto_radius_km(args.max_zoom):.1f} km @z{args.max_zoom} "
 				"(wide swath at low zoom -> tight focus at high zoom)",
